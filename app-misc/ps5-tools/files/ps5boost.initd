@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="Enable PS5 boost mode"
+command="/usr/sbin/ps5_control"
+
+start() {
+	if [[ ! -e /dev/mp1 ]]; then
+		eerror "/dev/mp1 does not exist; PS5 boost mode is not available"
+		return 1
+	fi
+
+	ebegin "Enabling PS5 boost mode"
+	${command} --boost on
+	eend $?
+}
+
+stop() {
+	if [[ ! -e /dev/mp1 ]]; then
+		return 0
+	fi
+
+	ebegin "Disabling PS5 boost mode"
+	${command} --boost off
+	eend $?
+}

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SINGLE=0
+
+usage() {
+	cat >&2 <<USAGE
+Usage:
+  ps5-install-bootfiles [--single] [ESP] [KERNEL] [INITRD]
+
+Default ESP:
+  /boot/efi
+
+Default mode writes:
+  ESP/bzImage-gentoo
+  ESP/initrd-gentoo.img
+
+Single mode writes:
+  ESP/bzImage
+  ESP/initrd.img
+
+If KERNEL and INITRD are omitted, the newest matching files below /boot are used.
+
+The script can create:
+  ESP/kexec-gentoo.sh
+  ESP/cmdline-gentoo.txt
+
+Environment:
+  PS5_ROOT_LABEL        Root filesystem label used for generated cmdline-gentoo.txt
+                        Default: gentoo
+
+  PS5_CMDLINE           Full command line used for generated cmdline-gentoo.txt
+                        Default: root=LABEL=\${PS5_ROOT_LABEL:-gentoo} rw rootwait
+
+Examples:
+  ps5-install-bootfiles /boot/efi
+
+  ps5-install-bootfiles --single /boot/efi
+
+  PS5_ROOT_LABEL=gentoo ps5-install-bootfiles /boot/efi
+
+  PS5_CMDLINE='root=UUID=1234-5678 rw rootwait' ps5-install-bootfiles /boot/efi
+
+  ps5-install-bootfiles /boot/efi /boot/kernel-7.0.5-ps5 /boot/initramfs-7.0.5-ps5.img
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--single)
+			SINGLE=1
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		--)
+			shift
+			break
+			;;
+		-*)
+			echo "ERROR: unknown option: $1" >&2
+			usage
+			exit 1
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+ESP="${1:-/boot/efi}"
+KERNEL="${2:-}"
+INITRD="${3:-}"
+
+ROOT_LABEL="${PS5_ROOT_LABEL:-gentoo}"
+DEFAULT_CMDLINE="${PS5_CMDLINE:-root=LABEL=${ROOT_LABEL} rw rootwait}"
+
+if [[ ${SINGLE} -eq 1 ]]; then
+	KERNEL_OUT="bzImage"
+	INITRD_OUT="initrd.img"
+else
+	KERNEL_OUT="bzImage-gentoo"
+	INITRD_OUT="initrd-gentoo.img"
+fi
+
+if [[ ! -d "${ESP}" ]]; then
+	echo "ERROR: ESP directory does not exist: ${ESP}" >&2
+	exit 1
+fi
+
+if ! mountpoint -q "${ESP}" 2>/dev/null; then
+	echo "WARNING: ${ESP} is not a mountpoint." >&2
+	echo "WARNING: Make sure this is really the PS5 Linux boot partition." >&2
+fi
+
+pick_latest() {
+	local pattern="$1"
+	local result
+
+	result="$(
+		find /boot -maxdepth 1 -type f -name "${pattern}" -printf '%T@ %p\n' 2>/dev/null \
+			| sort -n \
+			| tail -n1 \
+			| cut -d' ' -f2-
+	)"
+
+	[[ -n "${result}" ]] || return 1
+	printf '%s\n' "${result}"
+}
+
+pick_first_existing() {
+	local pattern
+	local result
+
+	for pattern in "$@"; do
+		if result="$(pick_latest "${pattern}")"; then
+			printf '%s\n' "${result}"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+if [[ -z "${KERNEL}" ]]; then
+	KERNEL="$(
+		pick_first_existing \
+			'kernel-*ps5*' \
+			'vmlinuz-*ps5*' \
+			'kernel-*' \
+			'vmlinuz-*' \
+			|| true
+	)"
+fi
+
+if [[ -z "${INITRD}" ]]; then
+	INITRD="$(
+		pick_first_existing \
+			'initramfs-*ps5*' \
+			'initrd-*ps5*' \
+			'initramfs-*' \
+			'initrd-*' \
+			|| true
+	)"
+fi
+
+if [[ -z "${KERNEL}" || ! -f "${KERNEL}" ]]; then
+	echo "ERROR: could not find kernel below /boot." >&2
+	echo "ERROR: pass it explicitly as second argument." >&2
+	exit 1
+fi
+
+if [[ -z "${INITRD}" || ! -f "${INITRD}" ]]; then
+	echo "ERROR: could not find initrd/initramfs below /boot." >&2
+	echo "ERROR: pass it explicitly as third argument." >&2
+	exit 1
+fi
+
+install_kexec_if_missing() {
+	local dst="${ESP}/kexec-gentoo.sh"
+
+	[[ -e "${dst}" ]] && return 0
+
+	cat > "${dst}" <<EOF_KEXEC_RUNTIME
+#!/bin/sh
+# Switch to Gentoo Linux via kexec
+set -e
+
+BOOT=/boot/efi
+
+kexec -l "\$BOOT/${KERNEL_OUT}" \\
+	--initrd="\$BOOT/${INITRD_OUT}" \\
+	--command-line="\$(cat "\$BOOT/cmdline-gentoo.txt")"
+
+kexec -e
+EOF_KEXEC_RUNTIME
+
+	chmod 0755 "${dst}"
+	echo "Created kexec-gentoo.sh"
+}
+
+install_cmdline_gentoo_if_missing() {
+	local dst="${ESP}/cmdline-gentoo.txt"
+
+	[[ -e "${dst}" ]] && return 0
+
+	printf '%s\n' "${DEFAULT_CMDLINE}" > "${dst}"
+	chmod 0644 "${dst}"
+
+	echo "Created cmdline-gentoo.txt"
+	echo "  ${DEFAULT_CMDLINE}"
+}
+
+install -Dm0644 "${KERNEL}" "${ESP}/${KERNEL_OUT}"
+install -Dm0644 "${INITRD}" "${ESP}/${INITRD_OUT}"
+
+install_kexec_if_missing
+install_cmdline_gentoo_if_missing
+
+echo "Installed PS5 Gentoo boot files to ${ESP}:"
+echo "  ${KERNEL_OUT} <- ${KERNEL}"
+echo "  ${INITRD_OUT} <- ${INITRD}"

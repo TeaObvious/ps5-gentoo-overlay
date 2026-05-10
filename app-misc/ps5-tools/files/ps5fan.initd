@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="Enable PS5 fan control"
+command="/usr/sbin/ps5_control"
+
+start() {
+	if [[ ! -e /dev/icc ]]; then
+		eerror "/dev/icc does not exist; PS5 fan control is not available"
+		return 1
+	fi
+
+	ebegin "Enabling PS5 fan control"
+	${command} --fan on
+	eend $?
+}
+
+stop() {
+	if [[ ! -e /dev/icc ]]; then
+		return 0
+	fi
+
+	ebegin "Disabling PS5 fan control"
+	${command} --fan off
+	eend $?
+}
